@@ -292,10 +292,6 @@ class XGBoostClassifier:
         Uses sklearn's compute_sample_weight('balanced') which implements:
             weight(i) = total / (n_classes × count(class(i)))
 
-        This is the correct imbalance correction for XGBoost multiclass:
-        heavier weights on rare samples increase their gradient
-        contribution during tree fitting.
-
         Parameters
         ----------
         y_train : np.ndarray (N,)  integer class labels 0-6
@@ -326,8 +322,8 @@ class XGBoostClassifier:
         """
         Train XGBoost with early stopping on the validation set.
 
-        Validation set is used ONLY for early stopping — not for any
-        hyperparameter search — to prevent data leakage.
+        Validation set is used ONLY for early stopping  (not for any
+        hyperparameter search) to prevent data leakage.
 
         Parameters
         ----------
@@ -437,10 +433,6 @@ class XGBoostClassifier:
     ) -> None:
         """
         Plot XGBoost feature importance (gain) for the top N features.
-
-        'Gain' measures the average improvement in loss brought by a
-        feature across all splits that use it — the most meaningful
-        importance type for understanding which features drive predictions.
 
         Parameters
         ----------
@@ -603,11 +595,6 @@ class Evaluator:
     ) -> None:
         """
         Plot and save the normalised confusion matrix (row = recall).
-
-        Normalisation by true label (row-wise) shows recall per class,
-        making it visually apparent which classes are most confused
-        regardless of their size. Raw counts would make the 'nv' row
-        dominate the colour scale.
         """
         cm = confusion_matrix(labels, preds, normalize="true")
 
@@ -737,15 +724,6 @@ class MultimodalPipeline:
         Step 3  Train XGBoost with class-balanced sample weights
         Step 4  Evaluate on val and test sets
         Step 5  Save metrics summary, predictions, plots
-
-    No data leakage guarantee
-    ─────────────────────────
-        • Column dropping and the X/y split are applied identically and
-          independently to train, val, and test — no fitting happens here
-        • XGBoost early stopping uses val set for round selection only
-          (no hyperparameter search on val)
-        • sample_weight is computed from y_train only
-        • Val and test sets are never touched during training
     """
 
     def __init__(

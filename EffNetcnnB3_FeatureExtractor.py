@@ -205,17 +205,6 @@ def _header(title: str) -> None:
 def _set_seed(seed: int = 42) -> None:
     """
     Seed all RNGs for full reproducibility.
-
-    Four separate RNG systems must be seeded:
-        1. Python random — used internally by torchvision transforms
-        2. NumPy         — used for any array-level sampling operations
-        3. PyTorch CPU   — used for weight initialisation and CPU ops
-        4. CUDA          — used for GPU ops (if available)
-
-    Without seeding all four, different runs can produce different
-    augmented images even with the same inputs, making experiments
-    non-reproducible.
-    Ref: Goodfellow et al. (2016) — "Deep Learning", §11.4
     """
     random.seed(seed)
     np.random.seed(seed)
@@ -260,56 +249,13 @@ class AugmentationManager:
     ─── AUGMENTATION TECHNIQUES — INDIVIDUAL JUSTIFICATIONS ─────────────
 
     RandomHorizontalFlip / RandomVerticalFlip (p=0.5 each)
-        Dermoscopy images have no canonical orientation — a lesion on
-        the shoulder may be imaged rotated 180° relative to the same
-        lesion at a different appointment. Flips quadruple the viewpoint
-        diversity at near-zero computational cost.
-        Ref: Codella et al. (2018) — ISIC Challenge top submissions
 
     RandomRotation ±180°
-        Full-range rotation is justified because dermoscopy images truly
-        lack a 'correct' orientation, unlike natural images where
-        vertical direction is fixed by gravity.
-        Ref: Esteva et al. (2017, Nature) — dermatologist-level classifier
 
     RandomResizedCrop (scale 0.85–1.0)
-        Simulates slight zoom variation caused by dermoscope placement
-        distance. Scale is kept tight to avoid cropping away lesion
-        borders, which are diagnostically critical.
-        Ref: Perez et al. (2018) — "Data Augmentation for Skin Lesion Analysis"
 
     ColorJitter — brightness + contrast only (factor 0.8–1.2)
-        Models device and operator illumination variation across clinical
-        sites. Hue and saturation are NOT jittered because dermoscopy
-        diagnostic colour features (blue-white veil, red dots in melanoma)
-        have specific clinical meaning — altering hue synthesises
-        misleading chromatic artefacts.
-        Ref: Marchetti et al. (2018, J. Invest. Dermatol.)
 
-    ─── PROPORTIONAL CLASS BALANCING STRATEGY ───────────────────────────
-    Rather than balancing all classes to the size of 'nv' (6,705),
-    which would require replicating 'df' ~58× and inducing memorisation
-    of the 115 originals ("replication bias"), we use logarithmic
-    proportional scaling:
-
-        scale(c) = log(max_count + 1) / log(count(c) + 1)
-        target(c) = clamp(ceil(count(c) × scale(c)),
-                          MIN_AUGMENTED_SIZE, AUGMENTATION_CAP)
-
-    This gives larger multipliers to smaller classes while keeping the
-    relative ordering of class frequencies meaningful (preserving
-    approximate real-world disease prevalence).
-    Ref: Buda et al. (2018) — "A systematic study of the class imbalance
-         problem in CNNs"; Litjens et al. (2017) — "A Survey on Deep
-         Learning in Medical Image Analysis"
-
-    ─── UNIQUE-COMBINATION CONSTRAINT ───────────────────────────────────
-    For each original image, no two augmented copies may share the same
-    parameter tuple. Duplicate augmentations create correlated copies
-    that provide no new gradient signal — equivalent to a higher learning
-    rate on one sample without improving generalisation.
-    Ref: Perez & Wang (2017) — "The Effectiveness of Data Augmentation
-         in Image Classification using Deep Learning"
     """
 
     # ── Discrete parameter grids for collision-detectable uniqueness ───
@@ -336,10 +282,6 @@ class AugmentationManager:
     def build_train_transform(self) -> T.Compose:
         """
         Stochastic on-the-fly training augmentation pipeline.
-
-        NOTE FOR TEAMMATE B: This pipeline is identical to the one in
-        Teammate_B_classifier.py. Both files must use the same
-        augmentation to ensure a fair image-only vs multimodal comparison.
 
         Returns
         -------
@@ -564,23 +506,6 @@ class HAMDataset(Dataset):
     """
     PyTorch Dataset for HAM10000 with on-the-fly transform application.
 
-    ─── ORIGINAL vs AUGMENTED ROWS ───────────────────────────────────────
-    Each row in the DataFrame is either:
-        • Original (aug_params is None) → eval_transform applied
-          (clean, unaugmented representation of the original image)
-        • Augmented (aug_params is a tuple) → deterministic transform
-          applied via _apply_aug_params() using TF (functional API)
-
-    Using the functional API for augmented rows ensures full
-    reproducibility: the same parameter tuple always produces the same
-    pixel values regardless of DataLoader worker count or ordering.
-
-    ─── WHY NOT ALWAYS USE THE STOCHASTIC TRAIN TRANSFORM? ───────────────
-    For feature extraction we need deterministic outputs — the same input
-    must always yield the same 1536-dim embedding so the feature matrix
-    can be saved once and reliably loaded by Teammate C. Stochastic
-    transforms on the original rows would produce different embeddings on
-    each run, breaking this guarantee.
     """
 
     def __init__(
@@ -591,25 +516,7 @@ class HAMDataset(Dataset):
         is_train:        bool = True,
         force_train_transform: bool = False,
     ) -> None:
-        """
-        Parameters
-        ----------
-        df              : DataFrame with 'filepath', 'dx', 'image_id',
-                          and optionally 'aug_params'.
-        train_transform : Stochastic pipeline. Used for the fine-tuning
-                          phase when force_train_transform=True; otherwise
-                          kept for API parity (extraction uses aug_params).
-        eval_transform  : Deterministic resize + normalise pipeline.
-        is_train        : If True, aug_params rows use deterministic
-                          functional transforms. If False, eval_transform
-                          is always used.
-        force_train_transform : If True, the stochastic train_transform is
-                          applied to EVERY sample (used only by the
-                          FineTuner training loop, where fresh per-epoch
-                          augmentation of the raw split is desired). This
-                          does NOT affect the deterministic feature-export
-                          path, which leaves this flag at its default.
-        """
+ 
         self.df              = df.reset_index(drop=True)
         self.train_transform = train_transform
         self.eval_transform  = eval_transform
@@ -753,8 +660,8 @@ class DatasetManager:
         Build and return (train_loader, val_loader, test_loader).
 
         shuffle=False for all loaders because:
-            • We need row order preserved to align features with metadata
-            • The augmentation diversity comes from the aug_params column,
+            - We need row order preserved to align features with metadata
+            - The augmentation diversity comes from the aug_params column,
               not from DataLoader shuffling
 
         Parameters
@@ -828,22 +735,7 @@ class FineTunedEffNetB3(nn.Module):
     The classifier head provides the gradient signal that fine-tunes the
     unfrozen blocks. After training, the head is DISCARDED: feature
     extraction uses only `self.features → GAP → flatten`, yielding the
-    same 1536-dim embedding contract as the original frozen extractor —
-    just with fine-tuned weights.
-
-    ─── BATCHNORM HANDLING ──────────────────────────────────────────────
-    BatchNorm behaviour is governed exactly as in the reference classifier
-    via model.train() / model.eval():
-        • During training (.train()): BN layers in the UNFROZEN blocks
-          update their running mean/var and use batch statistics. BN in
-          frozen blocks still has affine params frozen (requires_grad
-          False) but, matching the reference, running stats are left to
-          PyTorch defaults — the reference does not call eval() on frozen
-          BN, so neither do we, preserving identical fine-tuning dynamics.
-        • During extraction (.eval()): ALL BN layers use their stored
-          running statistics, guaranteeing deterministic embeddings.
-    Keeping this identical to the reference is intentional: it is the
-    "BatchNorm handling logic implemented in the classifier version".
+    same 1536-dim embedding contract as the original frozen extractor.
     """
 
     def __init__(self, num_classes: int = NUM_CLASSES) -> None:
@@ -884,7 +776,7 @@ class FineTunedEffNetB3(nn.Module):
 
     def embed(self, x: torch.Tensor) -> torch.Tensor:
         """
-        Embedding-only forward pass (backbone, NO head) — used during
+        Embedding-only forward pass (backbone, NO head) - used during
         feature extraction. Produces the (batch, 1536) representation.
         """
         x = self.features(x)
@@ -910,14 +802,6 @@ class FineTuner:
         Scheduler  : ReduceLROnPlateau(mode="min", factor=0.5, patience=3)
         Stopping   : monitor val loss; save on improvement; early stop
                      after FINETUNE_PATIENCE epochs without improvement
-
-    ─── WHY TRAIN ON THE RAW SPLIT WITH STOCHASTIC AUGMENTATION? ─────────
-    The fine-tuning phase mirrors the reference classifier's regime: the
-    original (un-expanded) train_df is wrapped with the stochastic
-    build_train_transform(), so each epoch sees freshly augmented views.
-    This is deliberately DECOUPLED from the deterministic, expanded
-    augmented DataFrame used later for feature export — that export
-    contract (originals + fixed aug_params rows) is preserved untouched.
     """
 
     def __init__(
@@ -1126,35 +1010,6 @@ class FeatureExtractor:
     Wraps a FINE-TUNED EfficientNetB3 backbone and extracts 1536-dim
     embedding vectors for every image in a DataLoader.
 
-    ─── WHY EfficientNetB3 FOR EXTRACTION? ──────────────────────────────
-    EfficientNetB3 achieves 81.6% top-1 ImageNet accuracy with 12M
-    parameters at 300×300. For feature extraction specifically:
-        • B3 provides richer feature representations than B2 (1408-dim)
-          at a modest parameter cost increase
-        • Gessert et al. (2020) — "Skin Lesion Classification Using
-          EfficientNets" found B3 features superior to B2 on ISIC data
-        • 300×300 input preserves more fine-grained dermoscopy detail
-          (colour gradients, border irregularity) than 260×260
-
-    ─── FROZEN-AT-EXTRACTION, BUT FINE-TUNED ────────────────────────────
-    The backbone is no longer the raw ImageNet model: blocks 6–8 have been
-    fine-tuned on HAM10000 (see FineTuner). At extraction time, however,
-    the model is fixed — best checkpoint loaded, eval() mode, gradients
-    disabled — so the extractor remains a deterministic function
-    f: image → R^1536. The same input always yields the same embedding,
-    keeping the saved .npy files reproducible and reusable by Teammate C.
-    The embeddings therefore reflect dermoscopy-specialised features, not
-    the original frozen ImageNet ones.
-    Ref: Yosinski et al. (2014) — "How transferable are features in DNNs?"
-
-    ─── WHY GLOBAL AVERAGE POOLING? ─────────────────────────────────────
-    The last EfficientNetB3 conv stage produces a (batch, 1536, H', W')
-    feature map. Global Average Pooling collapses spatial dimensions to
-    (batch, 1536) — one embedding per image. Alternative (flatten) would
-    produce (batch, 1536 × H' × W') vectors (~tens of thousands of dims)
-    that are harder to pass to Teammate C's network and are not spatially
-    normalised. GAP is both more compact and semantically richer.
-    Ref: Lin et al. (2014) — "Network In Network" (GAP for classification)
     """
 
     def __init__(
@@ -1466,22 +1321,6 @@ class ExtractionPipeline:
         Step 9  Verify label alignment (hard assertion)
         Step 10 Save .npy feature matrices + metadata CSVs
         Step 11 Plot diagnostics and print summary
-
-    Teammate C integration
-    ──────────────────────
-    After run() completes, output_dir contains six files:
-        train_features.npy  (N_aug, 1536)  + train_meta.csv
-        val_features.npy    (N_val, 1536)  + val_meta.csv
-        test_features.npy   (N_test, 1536) + test_meta.csv
-
-    Teammate C should:
-        1. Load {split}_features.npy  → image embeddings (1536-dim)
-        2. Load {split}_meta.csv      → extract metadata vector:
-               [age, sex, loc_abdomen, ..., loc_upper extremity]
-               = 17 features (2 numeric + 15 OHE localization)
-        3. Verify row alignment: features[i] ↔ meta.iloc[i] via image_id
-        4. Concatenate: [image_emb (1536) | metadata (17)] = 1553-dim
-        5. Use 'dx' column as the label (int 0–6)
     """
 
     def __init__(
@@ -1664,9 +1503,6 @@ class ExtractionPipeline:
 
 
 # ─────────────────────────────────────────────────────────────────────────
-# MAIN EXECUTION
-# ─────────────────────────────────────────────────────────────────────────
-
 # ─────────────────────────────────────────────────────────────────────────
 # MAIN EXECUTION
 # ─────────────────────────────────────────────────────────────────────────
